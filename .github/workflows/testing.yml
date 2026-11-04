@@ -1,0 +1,91 @@
+name: Testing and Coverage
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  JAVA_VERSION: '17'
+  MAVEN_OPTS: '-Xmx512m'
+
+jobs:
+  test:
+    name: Test and Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      # --- Run tests with coverage -----------
+      - name: Run tests
+        run: mvn clean verify
+
+      # --- Upload test results ---------------
+      - name: Upload test results
+        if: always()           # upload even if tests fail
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            target/surefire-reports/
+            target/site/jacoco/
+          retention-days: 7
+
+      # --- Publish test report in GitHub UI --
+      - name: Publish test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: JUnit Test Results
+          path: target/surefire-reports/*.xml
+          reporter: java-junit
+          fail-on-error: true
+
+      # --- Coverage summary ------------------
+      - name: Coverage summary
+        run: |
+          echo "## Test Coverage" >> $GITHUB_STEP_SUMMARY
+          echo ""                 >> $GITHUB_STEP_SUMMARY
+          
+          # Extract coverage from JaCoCo XML
+          if [ -f target/site/jacoco/jacoco.xml ]; then
+            MISSED=$(grep -o 'missed="[0-9]*"' \
+              target/site/jacoco/jacoco.xml | \
+              head -1 | grep -o '[0-9]*')
+            COVERED=$(grep -o 'covered="[0-9]*"' \
+              target/site/jacoco/jacoco.xml | \
+              head -1 | grep -o '[0-9]*')
+            TOTAL=$((MISSED + COVERED))
+            if [ $TOTAL -gt 0 ]; then
+              PCT=$((COVERED * 100 / TOTAL))
+              echo "| Metric | Value |" \
+                >> $GITHUB_STEP_SUMMARY
+              echo "|--------|-------|" \
+                >> $GITHUB_STEP_SUMMARY
+              echo "| Lines covered | $COVERED |" \
+                >> $GITHUB_STEP_SUMMARY
+              echo "| Lines missed  | $MISSED  |" \
+                >> $GITHUB_STEP_SUMMARY
+              echo "| Coverage      | ${PCT}%   |" \
+                >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      # --- Fail if coverage too low ----------
+      - name: Check coverage threshold
+        run: |
+          mvn jacoco:check \
+            -Dcoverage.minimum=0.70 || (
+            echo "Coverage below 70% threshold"
+            exit 1
+          )
