@@ -71,7 +71,7 @@
 
           <!-- Fail build if coverage below minimum -->
           <execution>
-            <id>check</id>
+            <id>default-cli</id>
             <goals>
               <goal>check</goal>
             </goals>
