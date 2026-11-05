@@ -1,0 +1,237 @@
+name: Build and Test Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+  pull_request:
+    branches: [main]
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DIST: temurin
+  MAVEN_OPTS: '-Xmx512m'
+  COVERAGE_THRESHOLD: '70'
+
+jobs:
+  # - Job 1: Test
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.pct }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DIST }}
+          cache: maven
+
+      - name: Run tests with coverage
+        run: mvn clean verify --no-transfer-progress
+
+      - name: Extract coverage percentage
+        id: coverage
+        run: |
+          if [ -f target/site/jacoco/jacoco.xml ]; then
+            MISSED=$(grep -o 'missed="[0-9]*"' \
+              target/site/jacoco/jacoco.xml | \
+              head -1 | grep -o '[0-9]*')
+            COVERED=$(grep -o 'covered="[0-9]*"' \
+              target/site/jacoco/jacoco.xml | \
+              head -1 | grep -o '[0-9]*')
+            TOTAL=$((MISSED + COVERED))
+            PCT=0
+            [ $TOTAL -gt 0 ] && \
+              PCT=$((COVERED * 100 / TOTAL))
+            echo "pct=$PCT" >> $GITHUB_OUTPUT
+            echo "Coverage: $PCT%"
+          else
+            echo "pct=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts
+          path: |
+            target/surefire-reports/
+            target/site/jacoco/
+          retention-days: 7
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo ""              >> $GITHUB_STEP_SUMMARY
+
+          # Count test results
+          TOTAL=0
+          PASSED=0
+          FAILED=0
+          for f in target/surefire-reports/TEST-*.xml; do
+            [ -f "$f" ] || continue
+            T=$(grep -o 'tests="[0-9]*"' "$f" | \
+              grep -o '[0-9]*' | head -1)
+            F=$(grep -o 'failures="[0-9]*"' "$f" | \
+              grep -o '[0-9]*' | head -1)
+            E=$(grep -o 'errors="[0-9]*"' "$f" | \
+              grep -o '[0-9]*' | head -1)
+            TOTAL=$((TOTAL + ${T:-0}))
+            FAILED=$((FAILED + ${F:-0} + ${E:-0}))
+          done
+          PASSED=$((TOTAL - FAILED))
+
+          echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| √ Passed | $PASSED |" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "| X Failed | $FAILED |" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "| Total  | $TOTAL |" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "| Coverage | ${{ steps.coverage.outputs.pct }}% |" \
+            >> $GITHUB_STEP_SUMMARY
+
+  # - Job 2: Build
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      jar:     ${{ steps.version.outputs.jar }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DIST }}
+          cache: maven
+
+      - name: Generate version
+        id: version
+        run: |
+          SHA=$(echo $GITHUB_SHA | cut -c1-7)
+          NUM=${{ github.run_number }}
+          VERSION="1.0.${NUM}-${SHA}"
+          JAR="springapp-${VERSION}.jar"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "jar=$JAR"       >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Build JAR
+        run: |
+          mvn package \
+            -DskipTests \
+            -Dapp.version=${{ steps.version.outputs.version }} \
+            --no-transfer-progress \
+            -q
+
+      - name: Rename JAR
+        run: |
+          cd target
+          ORIGINAL=$(ls *.jar | \
+            grep -v original | head -1)
+          mv "$ORIGINAL" \
+            "${{ steps.version.outputs.jar }}"
+          echo "JAR: $(ls -lh *.jar)"
+
+      - name: Verify JAR
+        run: |
+          JAR="target/${{ steps.version.outputs.jar }}"
+          echo "JAR exists: $(ls -lh $JAR)"
+          echo "JAR valid: $(jar -tf $JAR | \
+            grep -c .class) classes"
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: target/${{ steps.version.outputs.jar }}
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Build summary
+        run: |
+          echo "## Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo ""               >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |"    >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"        >> $GITHUB_STEP_SUMMARY
+          echo "| Version  | ${{ steps.version.outputs.version }} |" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "| JAR      | ${{ steps.version.outputs.jar }} |" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "| Coverage | ${{ needs.test.outputs.coverage }}% |" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "| Branch   | ${{ github.ref_name }} |" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "| Actor    | ${{ github.actor }} |" \
+            >> $GITHUB_STEP_SUMMARY
+
+  # - Job 3: Quality Gate
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: always()
+
+    steps:
+      - name: Check quality gate
+        run: |
+          COVERAGE=${{ needs.test.outputs.coverage }}
+          THRESHOLD=${{ env.COVERAGE_THRESHOLD }}
+          TEST="${{ needs.test.result }}"
+          BUILD="${{ needs.build.result }}"
+
+          echo "=== Quality Gate ==="
+          echo "Tests:     $TEST"
+          echo "Build:     $BUILD"
+          echo "Coverage:  ${COVERAGE}%"
+          echo "Minimum:   ${THRESHOLD}%"
+          echo ""
+
+          PASS=true
+
+          if [[ $TEST != "success" ]]; then
+            echo "X Tests failed"
+            PASS=false
+          else
+            echo "√ Tests passed"
+          fi
+
+          if [[ $BUILD != "success" ]]; then
+            echo "X Build failed"
+            PASS=false
+          else
+            echo "√ Build passed"
+          fi
+
+          if [[ $COVERAGE -lt $THRESHOLD ]]; then
+            echo "X Coverage ${COVERAGE}% below ${THRESHOLD}%"
+            PASS=false
+          else
+            echo "√ Coverage ${COVERAGE}% above ${THRESHOLD}%"
+          fi
+
+          echo ""
+          if [[ $PASS == "true" ]]; then
+            echo "√ Quality gate PASSED"
+            echo "  Version: ${{ needs.build.outputs.version }}"
+            echo "  Ready for deployment"
+          else
+            echo "X Quality gate FAILED"
+            exit 1
+          fi
