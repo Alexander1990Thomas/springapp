@@ -1,0 +1,51 @@
+# --- Stage 1: Extract layers ---
+FROM eclipse-temurin:17-jre-alpine AS extractor
+
+WORKDIR /extract
+
+# Copy the fat JAR
+COPY target/springapp-1.0.1.jar app.jar
+
+# Extract layers
+RUN java -Djarmode=layertools \
+    -jar app.jar extract
+
+# --- Stage 2: Runtime ---
+FROM eclipse-temurin:17-jre-alpine AS runtime
+
+RUN addgroup -S appgroup && \
+    adduser -S appuser -G appgroup
+
+WORKDIR /app
+
+# Copy layers in order (least to most changed)
+# Dependencies change rarely -> cached layer
+COPY --from=extractor /extract/dependencies/ ./
+
+# Spring Boot loader changes rarely
+COPY --from=extractor /extract/spring-boot-loader/ ./
+
+# Snapshot dependencies change sometimes
+COPY --from=extractor \
+    /extract/snapshot-dependencies/ ./
+
+# Application code changes every build
+COPY --from=extractor /extract/application/ ./
+
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s \
+  --timeout=10s \
+  --start-period=30s \
+  --retries=3 \
+  CMD wget -q -O - \
+    http://localhost:8080/api/health \
+    || exit 1
+
+ENTRYPOINT ["java", \
+  "-XX:+UseContainerSupport", \
+  "-XX:MaxRAMPercentage=75.0", \
+  "org.springframework.boot.loader.launch.JarLauncher"]
