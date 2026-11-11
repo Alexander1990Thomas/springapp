@@ -104,7 +104,7 @@ jobs:
           ssh -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=no \
             $USER@$SERVER \
-            "bash /opt/springapp/deploy.sh $TAG"
+            "bash -x /opt/springapp/deploy.sh $TAG"
 
       - name: Verify deployment
         run: |
