@@ -89,7 +89,7 @@ jobs:
           echo "${{ secrets.SERVER_SSH_KEY }}" \
             > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H \
+          ssh-keyscan -v -H \
             "${{ secrets.SERVER_HOST }}" \
             >> ~/.ssh/known_hosts
 
